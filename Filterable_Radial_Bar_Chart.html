@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Filterable Radial Bar Chart: Hourly Count by Selected Accident Sub-Type</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f9;
+            text-align: center;
+        }
+        .chart-title {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        #controls {
+            margin-bottom: 20px;
+        }
+        .radial-bar {
+            fill-opacity: 0.9; /* Increased opacity for more vibrant colors */
+            stroke: #fff;
+            stroke-width: 1px;
+            transition: fill-opacity 0.2s, stroke-width 0.2s;
+        }
+        .radial-bar:hover {
+            fill-opacity: 1.0;
+            stroke-width: 2px;
+        }
+        .axis-label {
+            font-size: 10px;
+            fill: #555;
+            text-anchor: middle;
+        }
+        .grid-circle {
+            fill: none;
+            stroke: #ccc;
+            stroke-dasharray: 2 2;
+        }
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            padding: 8px;
+            font: 12px sans-serif;
+            background: #fff;
+            border: 1px solid #333;
+            border-radius: 4px;
+            pointer-events: none;
+            opacity: 0;
+            color: #333;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="chart-title"><h2>Filterable Radial Bar Chart: Hourly Count by Selected Accident Sub-Type</h2></div>
+
+    <div id="controls">
+        <label for="accident-type-filter">1. Filter by Accident Sub-Type:</label>
+        <select id="accident-type-filter"></select>
+    </div>
+
+    <div id="chart-container"></div>
+
+    <script>
+        const radius = 300;
+        const width = radius * 2 + 50;
+        const height = radius * 2 + 50;
+        const innerRadius = 20;
+        const dataUrl = 'https://raw.githubusercontent.com/sheriefAbdallah/CS318/refs/heads/main/Traffic_Incidents.csv';
+
+        const svg = d3.select("#chart-container")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height)
+            .append("g")
+            .attr("transform", `translate(${width / 2}, ${height / 2})`);
+
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip");
+
+        // --- Scales ---
+        // X Scale (Time): Maps hour (0-24) to angle (0 to 2*PI)
+        const x = d3.scaleBand()
+            .domain(d3.range(24)) // 24 hours
+            .range([0, 2 * Math.PI])
+            .align(0); // Align bars to the start of their angular bin
+
+        // Y Scale (Count): Maps count (0 to Max) to radius (innerRadius to radius)
+        const y = d3.scaleRadial()
+            .range([innerRadius, radius]);
+
+        // Color Scale: NOW using d3.schemeSpectral for more vibrancy
+        const color = d3.scaleSequential(d3.interpolateSpectral).domain([0, 23]); // Color based on hour
+
+        // Radial Bar Generator
+        const arc = d3.arc()
+            .innerRadius(innerRadius)
+            .outerRadius(d => y(d.count))
+            .startAngle(d => x(d.hour))
+            .endAngle(d => x(d.hour) + x.bandwidth())
+            .padAngle(0.01) // Small padding between bars
+            .padRadius(innerRadius);
+
+        let fullData = []; // Stores the raw parsed data
+        let allAccidentTypes = [];
+
+        // --- Data Loading and Transformation ---
+        d3.csv(dataUrl).then(data => {
+
+            // 1. Process Data: Filter and Parse Hour/Name
+            fullData = data
+                .map(d => {
+                    const hour = d.acci_time ? parseInt(d.acci_time.split(':')[0], 10) : -1;
+                    const name = d.acci_name ? d.acci_name.trim() : '';
+                    return { hour, name };
+                })
+                .filter(d => d.hour >= 0 && d.name);
+
+            // 2. Identify Unique Accident Types for the Filter
+            allAccidentTypes = Array.from(new Set(fullData.map(d => d.name))).sort();
+
+            // 3. Populate Filter Dropdown
+            const filter = d3.select("#accident-type-filter");
+            filter.selectAll("option")
+                .data(allAccidentTypes)
+                .enter().append("option")
+                .attr("value", d => d)
+                .text(d => d);
+
+            // 4. Draw Initial Chart (first accident type in the list)
+            drawAxes(); // Draw axes once
+            updateChart(allAccidentTypes[0]); // Update with the first type
+
+            // 5. Setup Filter Listener
+            filter.on("change", function() {
+                updateChart(this.value);
+            });
+
+        }).catch(error => {
+            console.error("Error loading CSV:", error);
+            d3.select("#chart-container").html(`Error loading data from URL: ${error.message}. Check console for details.`);
+        });
+
+        // --- Core Drawing Functions ---
+
+        function drawAxes() {
+            // Radial lines for each hour
+            svg.selectAll(".radial-line")
+                .data(d3.range(24))
+                .enter().append("line")
+                .attr("stroke", "#eee")
+                .attr("stroke-width", 0.5)
+                .attr("transform", d => `rotate(${(x(d) * 180 / Math.PI) - 90})`)
+                .attr("x1", innerRadius)
+                .attr("x2", radius);
+
+            // Hour labels (every 3 hours for readability)
+            svg.selectAll(".hour-label")
+                .data(d3.range(0, 24, 3))
+                .enter().append("text")
+                .attr("class", "hour-label")
+                .attr("transform", d => {
+                    const angle = x(d) + x.bandwidth() / 2; // Position in middle of bar
+                    const rotateAngle = (angle * 180 / Math.PI) - 90;
+                    const xPos = (radius + 20) * Math.cos(angle - Math.PI / 2);
+                    const yPos = (radius + 20) * Math.sin(angle - Math.PI / 2);
+                    // Adjust rotation for labels on the left side
+                    const rotation = (angle > Math.PI / 2 && angle < 3 * Math.PI / 2) ? rotateAngle + 180 : rotateAngle;
+                    return `translate(${xPos}, ${yPos}) rotate(${rotation})`;
+                })
+                .text(d => `${d}:00`);
+
+            // Grid circles for count values (example: 0, 500, 1000, 1500, 2000)
+            const countTicks = [0, 500, 1000, 1500, 2000]; // Fixed for general case
+            svg.selectAll(".grid-circle")
+                .data(countTicks)
+                .enter().append("circle")
+                .attr("class", "grid-circle")
+                .attr("r", d => y(d));
+
+            // Count labels for grid circles
+            svg.selectAll(".count-label")
+                .data(countTicks.filter(d => d > 0)) // Exclude 0
+                .enter().append("text")
+                .attr("class", "axis-label")
+                .attr("y", d => -y(d))
+                .attr("dy", "0.31em")
+                .attr("dx", "5px")
+                .style("text-anchor", "start")
+                .text(d => d3.format(".1s")(d)); // Format as 1.0k, 1.5k etc.
+        }
+
+        function updateChart(selectedType) {
+            // 1. Filter Data
+            const filteredIncidents = fullData.filter(d => d.name === selectedType);
+
+            // 2. Aggregate Data: Count incidents per hour for the selected type
+            const hourlyCounts = d3.rollup(
+                filteredIncidents,
+                v => v.length,
+                d => d.hour
+            );
+
+            // 3. Prepare Plot Data (24 points for all hours)
+            const plotData = d3.range(24).map(hour => ({
+                hour: hour,
+                count: hourlyCounts.get(hour) || 0
+            }));
+
+            // 4. Update Y Scale Domain
+            const maxCount = d3.max(plotData, d => d.count) || 1; // Prevent domain of 0
+            y.domain([0, maxCount * 1.1]); // Add 10% buffer to max count
+
+            // 5. Update the Radial Bars
+            svg.selectAll(".radial-bar")
+                .data(plotData, d => d.hour)
+                .join(
+                    enter => enter.append("path")
+                        .attr("class", "radial-bar")
+                        .attr("fill", d => color(d.hour)) // Color each bar by hour
+                        .attr("d", arc)
+                        .on("mouseover", function(event, d) {
+                            d3.select(this).style("stroke-width", "2px");
+                            tooltip.transition().duration(100).style("opacity", .9);
+                            tooltip.html(`Hour: ${d.hour}:00<br/>Incidents: ${d.count}`)
+                                .style("left", (event.pageX + 10) + "px")
+                                .style("top", (event.pageY - 28) + "px");
+                        })
+                        .on("mouseout", function() {
+                            d3.select(this).style("stroke-width", "1px");
+                            tooltip.transition().duration(500).style("opacity", 0);
+                        }),
+                    update => update.transition().duration(500)
+                        .attr("d", arc)
+                        .attr("fill", d => color(d.hour)), // Ensure color update if domain changes (unlikely here)
+                    exit => exit.remove()
+                );
+            
+            // Re-draw grid circles to match updated y-scale
+            // Remove existing circles
+            svg.selectAll(".grid-circle").remove();
+            svg.selectAll(".count-label").remove();
+
+            const newCountTicks = y.ticks(5); // Get 5 ticks from the updated y scale
+            svg.selectAll(".grid-circle")
+                .data(newCountTicks)
+                .enter().append("circle")
+                .attr("class", "grid-circle")
+                .attr("r", d => y(d));
+            
+            svg.selectAll(".count-label")
+                .data(newCountTicks.filter(d => d > 0))
+                .enter().append("text")
+                .attr("class", "axis-label")
+                .attr("y", d => -y(d))
+                .attr("dy", "0.31em")
+                .attr("dx", "5px")
+                .style("text-anchor", "start")
+                .text(d => d3.format(".1s")(d));
+        }
+    </script>
+</body>
+</html>

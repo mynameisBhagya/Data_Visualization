@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Filterable Stacked Density Line Chart</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 20px;
+            background-color: #f4f4f9;
+            text-align: center;
+        }
+        .chart-title {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        #controls {
+            margin-bottom: 20px;
+        }
+        .chart-area {
+            opacity: 0.8;
+            transition: opacity 0.3s;
+        }
+        .chart-area:hover {
+            opacity: 1.0;
+        }
+        .tooltip {
+            position: absolute;
+            text-align: left;
+            padding: 8px;
+            font: 12px sans-serif;
+            background: #fff;
+            border: 1px solid #333;
+            border-radius: 4px;
+            pointer-events: none;
+            opacity: 0;
+            color: #333;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+        }
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            margin-right: 15px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            margin-right: 5px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div class="chart-title"><h2>Filterable Stacked Density Line Chart: Composition by Hour</h2></div>
+    
+    <div id="controls">
+        <label for="severity-filter">1. Filter by Severity Level:</label>
+        <select id="severity-filter">
+            <option value="All">All Incidents (Total View)</option>
+            <option value="Simple">بسيط (Simple)</option>
+            <option value="Severe">بليغ (Severe)</option>
+        </select>
+    </div>
+    
+    <div id="chart-container"></div>
+    <div id="legend-container"></div>
+    
+    <script>
+        const margin = { top: 30, right: 20, bottom: 50, left: 60 };
+        const width = 1000 - margin.left - margin.right;
+        const height = 500 - margin.top - margin.bottom;
+        const dataUrl = 'https://raw.githubusercontent.com/sheriefAbdallah/CS318/refs/heads/main/Traffic_Incidents.csv';
+
+        const svg = d3.select("#chart-container")
+            .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+            .append("g")
+            .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+        const tooltip = d3.select("body").append("div").attr("class", "tooltip");
+        
+        // --- Scales and Layouts ---
+        const x = d3.scaleLinear().domain([0, 23]).range([0, width]);
+        const y = d3.scaleLinear().range([height, 0]);
+        const color = d3.scaleOrdinal(d3.schemePaired); // Paired scheme for good contrast
+
+        const area = d3.area()
+            .x(d => x(d.data.hour))
+            .y0(d => y(d[0]))
+            .y1(d => y(d[1]))
+            .curve(d3.curveCardinal); // Smooth transition
+
+        const stack = d3.stack().keys([]); // Keys set after data load
+        
+        let aggregatedData = new Map(); // Stores the full nested data
+        let allAccidentTypes = [];
+        let globalMaxY = 0;
+
+        // --- Utility Function to get Severity from Name ---
+        function getSeverity(name) {
+            const trimmedName = name.trim();
+            if (trimmedName.includes('بسيط')) return 'Simple';
+            if (trimmedName.includes('بليغ')) return 'Severe';
+            return 'Other'; 
+        }
+
+        // --- Data Loading and Transformation ---
+        d3.csv(dataUrl).then(data => {
+
+            // 1. Process and Categorize Data
+            const incidents = data.map(d => {
+                const hour = d.acci_time ? parseInt(d.acci_time.split(':')[0], 10) : -1;
+                const name = d.acci_name ? d.acci_name.trim() : 'Unknown Type';
+                return { hour, type: name, severity: getSeverity(name) };
+            }).filter(d => d.hour >= 0 && d.type);
+
+            // 2. Aggregate Data: Count incidents per Hour, per Type, per Severity
+            const nested = d3.rollup(
+                incidents,
+                v => v.length,
+                d => d.severity,
+                d => d.type,
+                d => d.hour
+            );
+            
+            // 3. Transform to Hour-Centric Structure and calculate 'All'
+            
+            // Collect all unique types
+            allAccidentTypes = Array.from(d3.group(incidents, d => d.type).keys()).sort();
+            color.domain(allAccidentTypes);
+
+            // Structure the data for D3 Stack: [ { hour: 0, typeA: 5, typeB: 10, ... }, {...} ]
+            const severityLevels = ["All", "Simple", "Severe"];
+            severityLevels.forEach(severity => {
+                const hourData = d3.range(24).map(hour => ({ hour: hour }));
+                
+                // Max count tracking for consistent Y scale
+                let hourlyTotal = 0;
+                let maxHourlyTotal = 0;
+                
+                hourData.forEach(d => {
+                    hourlyTotal = 0;
+                    allAccidentTypes.forEach(type => {
+                        const count = 
+                            (severity === "All" && (nested.get("Simple")?.get(type)?.get(d.hour) || 0) + (nested.get("Severe")?.get(type)?.get(d.hour) || 0)) ||
+                            (severity !== "All" && nested.get(severity)?.get(type)?.get(d.hour) || 0);
+
+                        d[type] = count;
+                        hourlyTotal += count;
+                    });
+                    if (hourlyTotal > maxHourlyTotal) {
+                        maxHourlyTotal = hourlyTotal;
+                    }
+                });
+                aggregatedData.set(severity, hourData);
+                if (maxHourlyTotal > globalMaxY) {
+                    globalMaxY = maxHourlyTotal;
+                }
+            });
+            
+            // 4. Setup Axes and Initial View
+            y.domain([0, globalMaxY * 1.05]); // Set Y domain based on absolute max
+            
+            drawAxes();
+            drawLegend();
+            updateChart("All");
+            
+            // 5. Setup Filter Listener
+            d3.select("#severity-filter").on("change", function() {
+                updateChart(this.value);
+            });
+            
+        }).catch(error => {
+            console.error("Error loading CSV:", error);
+            d3.select("#chart-container").html(`Error loading data from URL: ${error.message}. Check console for details.`);
+        });
+
+        // --- Core Drawing Functions ---
+
+        function drawAxes() {
+            // X-Axis (Hours)
+            svg.append("g")
+                .attr("transform", `translate(0, ${height})`)
+                .call(d3.axisBottom(x).tickFormat(d => `${d}:00`).tickValues(d3.range(0, 24, 3)))
+                .append("text")
+                .attr("y", 35)
+                .attr("x", width / 2)
+                .attr("fill", "#000")
+                .text("Hour of Day");
+
+            // Y-Axis (Incident Count)
+            svg.append("g")
+                .call(d3.axisLeft(y).ticks(10))
+                .append("text")
+                .attr("transform", "rotate(-90)")
+                .attr("y", -margin.left + 5)
+                .attr("dy", "0.71em")
+                .attr("fill", "#000")
+                .text("Incident Count (Stacked)");
+        }
+        
+        function drawLegend() {
+            const legend = d3.select("#legend-container");
+            legend.selectAll(".legend-item")
+                .data(allAccidentTypes)
+                .join("div")
+                .attr("class", "legend-item")
+                .html(d => `<span class="legend-color" style="background-color:${color(d)};"></span>${d}`);
+        }
+
+        function updateChart(severityFilter) {
+            const filteredData = aggregatedData.get(severityFilter);
+            
+            // 1. Update Stack Layout
+            stack.keys(allAccidentTypes);
+            const stackedSeries = stack(filteredData);
+
+            // 2. Draw/Update the Area Paths
+            svg.selectAll(".chart-area")
+                .data(stackedSeries, d => d.key)
+                .join(
+                    enter => enter.append("path")
+                        .attr("class", "chart-area")
+                        .attr("fill", d => color(d.key))
+                        .attr("d", area)
+                        .call(addInteractions),
+                    
+                    update => update.transition().duration(700)
+                        .attr("d", area),
+
+                    exit => exit.transition().duration(700)
+                        .attr("d", d3.area()
+                            .x(d => x(d.data.hour))
+                            .y0(d => height)
+                            .y1(d => height)
+                        )
+                        .remove()
+                );
+        }
+
+        function addInteractions(selection) {
+            selection
+                .on("mouseover", function(event, d) {
+                    d3.select(this).style("opacity", 1.0);
+                    
+                    const [mx, my] = d3.pointer(event);
+                    const hour = Math.round(x.invert(mx));
+                    
+                    const currentDataPoint = d.find(p => p.data.hour === hour);
+                    if (!currentDataPoint) return;
+
+                    const count = currentDataPoint[1] - currentDataPoint[0];
+                    const totalAtHour = d3.sum(d.parent.map(s => s.find(p => p.data.hour === hour)[1] - s.find(p => p.data.hour === hour)[0]));
+                    const percent = ((count / totalAtHour) * 100).toFixed(1);
+                    
+                    tooltip.transition().duration(100).style("opacity", .9);
+                    tooltip.html(`**${d.key}**<br/>Hour: ${hour}:00<br/>Count: ${d3.format(",")(count)}<br/>% of Total: ${percent}%`)  
+                        .style("left", (event.pageX + 10) + "px")     
+                        .style("top", (event.pageY - 28) + "px");    
+                })
+                .on("mouseout", function() {
+                    d3.select(this).style("opacity", 0.8);
+                    tooltip.transition().duration(500).style("opacity", 0);
+                });
+        }
+    </script>
+</body>
+</html>
